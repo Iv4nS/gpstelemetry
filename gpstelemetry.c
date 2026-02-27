@@ -30,6 +30,7 @@ Place - Suite 330, Boston, MA 02111-1307, USA.
 
 static const char *const column_names[] =
 {
+	"file",
 	"cts",
 	"date",
 	"GPS (Lat.) [deg]",
@@ -59,20 +60,67 @@ int main(int argc, char* argv[])
 	time_t gps9_epoch;
 	struct tm tm;
 	bool use_gps9 = false;
+	int min_fix = -1; /* -1 means no filtering */
+	int max_precision = -1; /* -1 means no filtering */
+	bool print_filename = false;
+	bool print_filepath = false;
 
 	if (argc < 2)
 	{
-		fprintf(stderr, "%s <mp4file> [mp4file_2] ... [mp4file_n]\n", argv[0]);
+		fprintf(stderr, "%s [options] <mp4file> [mp4file_2] ... [mp4file_n]\n", argv[0]);
+		fprintf(stderr, "  --print_filename   print the filename in output\n");
+		fprintf(stderr, "  --print_filepath   print the full file path in output\n");
+		fprintf(stderr, "  --min_fix=N        only output entries with fix >= N\n");
+		fprintf(stderr, "  --max_precision=N  only output entries with precision <= N\n");
 		return -1;
 	}
 
 	memset(&tm, 0, sizeof(tm));
 	tm.tm_year = 100;
 	gps9_epoch = timegm(&tm);
-	
-	for (int argc_index = 1; argc_index < argc; argc_index++)
+
+	/* check for filter parameters */
+	int first_file_index = 1;
+	while (first_file_index < argc)
+	{
+		if (strcmp(argv[first_file_index], "--print_filename") == 0)
+		{
+			print_filename = true;
+			first_file_index++;
+		}
+		else if (strcmp(argv[first_file_index], "--print_filepath") == 0)
+		{
+			print_filepath = true;
+			first_file_index++;
+		}
+		else if (strncmp(argv[first_file_index], "--min_fix=", 10) == 0)
+		{
+			min_fix = atoi(argv[first_file_index] + 10);
+			first_file_index++;
+		}
+		else if (strncmp(argv[first_file_index], "--max_precision=", 16) == 0)
+		{
+			max_precision = atoi(argv[first_file_index] + 16);
+			first_file_index++;
+		}
+		else
+		{
+			break; /* not a parameter, must be a filename */
+		}
+	}
+
+	if (first_file_index >= argc)
+	{
+		fprintf(stderr, "%s [options] <mp4file> [mp4file_2] ... [mp4file_n]\n", argv[0]);
+		return -1;
+	}
+
+	for (int argc_index = first_file_index; argc_index < argc; argc_index++)
 	{
 		char *mp4filename = argv[argc_index];
+		/* extract just the filename from the path */
+		const char *display_name = strrchr(mp4filename, '/');
+		display_name = display_name ? display_name + 1 : mp4filename;
 
 		/* search for GPMF Track */
 		size_t mp4handle = OpenMP4Source(mp4filename, MOV_GPMF_TRAK_TYPE, MOV_GPMF_TRAK_SUBTYPE, 0);
@@ -86,11 +134,14 @@ int main(int argc, char* argv[])
 		double metadataduration = GetDuration(mp4handle);
 		if (metadataduration <= 0.0) return -1;
 
-		if (1 == argc_index)
+		if (first_file_index == argc_index)
 		{
 			/* print column names on the first row */
-			for (int i = 0; i < (sizeof(column_names) / sizeof(*column_names)); i++)
-				printf("%s\"%s\"", (i) ? "," : "", column_names[i]);
+			int col = 0;
+			if (print_filename || print_filepath)
+				printf("\"%s\"", column_names[0]); /* "file" */
+			for (int i = 1; i < (sizeof(column_names) / sizeof(*column_names)); i++)
+				printf("%s\"%s\"", (col++ || print_filename || print_filepath) ? "," : "", column_names[i]);
 			printf("\n");
 		}
 
@@ -181,16 +232,29 @@ int main(int argc, char* argv[])
 						{
 							/* at this point, we should have all the data (with "GPS5" being at the highest sample rate) */
 
-							/* we print the time... */
-							printf("%f, ", (file_start + now) * 1000.0);
-							char ftimestr[64];
-							strftime(ftimestr, sizeof(ftimestr), "%Y-%m-%dT%H:%M:%S", gmtime(&gpsu.time));
-							printf("%s.%03dZ, ", ftimestr, (int)gpsu.milliseconds);
+							/* apply filters if specified */
+							if ((min_fix < 0 || (int)fix >= min_fix) &&
+							    (max_precision < 0 || (int)precision <= max_precision))
+							{
+								/* we print the filename (if requested) and time... */
+								if (print_filepath)
+									printf("\"%s\", ", mp4filename);
+								else if (print_filename)
+									printf("\"%s\", ", display_name);
+								printf("%f, ", (file_start + now) * 1000.0);
+								char ftimestr[64];
+								strftime(ftimestr, sizeof(ftimestr), "%Y-%m-%dT%H:%M:%S", gmtime(&gpsu.time));
+								printf("%s.%03dZ, ", ftimestr, (int)gpsu.milliseconds);
 
-							/* ... and print out all the data */
-							for (uint32_t j = 0; j < elements; j++)
-								printf("%.6f, ", *ptr++);
-							printf("%d, %d\n", fix, precision);
+								/* ... and print out all the data */
+								for (uint32_t j = 0; j < elements; j++)
+									printf("%.6f, ", *ptr++);
+								printf("%d, %d\n", fix, precision);
+							}
+							else
+							{
+								ptr += elements; /* skip this sample's data */
+							}
 
 							/*
 							the time increment potentially rolls over into the next minute, hour, or even day
@@ -206,23 +270,35 @@ int main(int argc, char* argv[])
 						else if (STR2FOURCC("GPS9") == key)
 						{
 							use_gps9 = true;
+							int gps9_fix = (int)ptr[8]; /* fix is at index 8 in GPS9 */
+							int gps9_precision = (int)ptr[7]; /* precision is at index 7 in GPS9 */
 
-							/* we print the time... */
-							printf("%f, ", (file_start + now) * 1000.0);
-							char ftimestr[64];
-							if (0.0 == now)
+							/* apply filters if specified */
+							if ((min_fix < 0 || gps9_fix >= min_fix) &&
+							    (max_precision < 0 || gps9_precision <= max_precision))
 							{
-								gpsu.time = gps9_epoch + /* days since 2000 */ ((time_t)ptr[5] + 1) * /* secs per day */ 86400;
-								double sub_secs = fmod(ptr[6], 1.0);
-								gpsu.milliseconds = (int)(1000.0 * sub_secs);
-								gpsu.time += (time_t)(ptr[6] - sub_secs);
+								/* we print the filename (if requested) and time... */
+								if (print_filepath)
+									printf("\"%s\", ", mp4filename);
+								else if (print_filename)
+									printf("\"%s\", ", display_name);
+								printf("%f, ", (file_start + now) * 1000.0);
+								char ftimestr[64];
+								if (0.0 == now)
+								{
+									gpsu.time = gps9_epoch + /* days since 2000 */ ((time_t)ptr[5] + 1) * /* secs per day */ 86400;
+									double sub_secs = fmod(ptr[6], 1.0);
+									gpsu.milliseconds = (int)(1000.0 * sub_secs);
+									gpsu.time += (time_t)(ptr[6] - sub_secs);
+								}
+								strftime(ftimestr, sizeof(ftimestr), "%Y-%m-%dT%H:%M:%S", gmtime(&gpsu.time));
+								printf("%s.%03dZ", ftimestr, (int)gpsu.milliseconds);
+								for (uint32_t j = 0; j < (sizeof(gps9_indexes) / sizeof(*gps9_indexes)); j++)
+									printf(", %.6f", ptr[gps9_indexes[j]]);
+								printf("\n");
 							}
-							strftime(ftimestr, sizeof(ftimestr), "%Y-%m-%dT%H:%M:%S", gmtime(&gpsu.time));
-							printf("%s.%03dZ", ftimestr, (int)gpsu.milliseconds);
-							for (uint32_t j = 0; j < (sizeof(gps9_indexes) / sizeof(*gps9_indexes)); j++)
-								printf(", %.6f", ptr[gps9_indexes[j]]);
-							printf("\n");
 
+							ptr += elements; /* advance to next sample */
 							now += step; gpsu.milliseconds += step * 1000.0;
 							if (gpsu.milliseconds >= 1000.0)
 							{

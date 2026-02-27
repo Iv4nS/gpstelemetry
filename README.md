@@ -16,7 +16,22 @@ git submodule update --init --recursive
 
 Then "make" the code.
 
-## Sample Usage
+## Usage
+
+```
+gpstelemetry [options] <mp4file> [mp4file_2] ... [mp4file_n]
+```
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--print_filename` | Include the filename in output |
+| `--print_filepath` | Include the full file path in output |
+| `--min_fix=N` | Only output entries with fix >= N |
+| `--max_precision=N` | Only output entries with precision <= N |
+
+## Examples
 
 ```
 gpstelemetry myfile.mp4
@@ -32,5 +47,11 @@ GoPro splits recordings into many files, even though these represent a single re
 
 ```
 gpstelemetry GL010009.LRV GL020009.LRV GL030009.LRV GL040009.LRV GL050009.LRV > myjourney.csv
+```
+
+Filter to only include entries with good GPS fix and precision:
+
+```
+gpstelemetry --min_fix=3 --max_precision=100 --print_filename myfile.mp4
 ```
 
